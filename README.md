@@ -35,21 +35,14 @@ Terraform provider for NetBox IPAM (IP Address Management) and organization reso
 
 ## Installation
 
-### Local Development
-
-```bash
-# Build and install locally
-make build
-make install
-```
-
-### Terraform Configuration
+### From Terraform Registry
 
 ```hcl
 terraform {
   required_providers {
     netbox = {
-      source = "local/justinr/netbox"
+      source  = "poroping/netbox"
+      version = "~> 0.1"
     }
   }
 }
@@ -58,6 +51,25 @@ provider "netbox" {
   url      = "https://demo.netbox.dev"
   token    = "your-api-token-here"
   insecure = false
+}
+```
+
+### Local Development
+
+```bash
+# Build and install locally
+make build
+make install
+```
+
+For local development, use:
+```hcl
+terraform {
+  required_providers {
+    netbox = {
+      source = "local/poroping/netbox"
+    }
+  }
 }
 ```
 
