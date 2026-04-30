@@ -32,13 +32,14 @@ type TenantResource struct {
 
 // TenantResourceModel describes the resource data model.
 type TenantResourceModel struct {
-	ID          types.String `tfsdk:"id"`
-	Name        types.String `tfsdk:"name"`
-	Slug        types.String `tfsdk:"slug"`
-	Description types.String `tfsdk:"description"`
-	Comments    types.String `tfsdk:"comments"`
-	Tags        []TagRef     `tfsdk:"tags"`
-	Upsert      types.Bool   `tfsdk:"upsert"`
+	ID           types.String `tfsdk:"id"`
+	Name         types.String `tfsdk:"name"`
+	Slug         types.String `tfsdk:"slug"`
+	Description  types.String `tfsdk:"description"`
+	Comments     types.String `tfsdk:"comments"`
+	Tags         []TagRef     `tfsdk:"tags"`
+	Upsert       types.Bool   `tfsdk:"upsert"`
+	UpsertBySlug types.Bool   `tfsdk:"upsert_by_slug"`
 }
 
 // TenantAPIModel represents the NetBox API response for a tenant
@@ -90,6 +91,10 @@ func (r *TenantResource) Schema(ctx context.Context, req resource.SchemaRequest,
 				Description: "If true, will find and use existing tenant with matching name instead of creating a new one.",
 				Optional:    true,
 			},
+			"upsert_by_slug": schema.BoolAttribute{
+				Description: "If true, will find and use existing tenant with matching slug instead of creating a new one. Takes precedence over upsert (name-based lookup) when both are set.",
+				Optional:    true,
+			},
 			"tags": schema.ListNestedAttribute{
 				Description: "Tags associated with this tenant.",
 				Optional:    true,
@@ -139,7 +144,62 @@ func (r *TenantResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	// Check if we should search for existing tenant
+	// Check if we should search for existing tenant by slug first
+	if !data.UpsertBySlug.IsNull() && data.UpsertBySlug.ValueBool() {
+		slug := Slugify(data.Name.ValueString())
+		params := url.Values{}
+		params.Add("slug", slug)
+
+		results, err := r.client.GetList(ctx, "/api/tenancy/tenants/", params)
+		if err != nil {
+			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to search for tenant by slug, got error: %s", err))
+			return
+		}
+
+		if len(results) > 0 {
+			var existing TenantAPIModel
+			if err := json.Unmarshal(results[0], &existing); err != nil {
+				resp.Diagnostics.AddError("Parse Error", fmt.Sprintf("Unable to parse tenant response: %s", err))
+				return
+			}
+
+			data.ID = types.StringValue(fmt.Sprintf("%d", existing.ID))
+
+			updateData := TenantAPIModel{
+				Name: data.Name.ValueString(),
+				Slug: existing.Slug,
+			}
+
+			if !data.Description.IsNull() {
+				updateData.Description = data.Description.ValueString()
+			}
+			if !data.Comments.IsNull() {
+				updateData.Comments = data.Comments.ValueString()
+			}
+			if len(data.Tags) > 0 {
+				updateData.Tags = ConvertTagsToAPI(data.Tags)
+			}
+
+			apiResp, err := r.client.Update(ctx, fmt.Sprintf("/api/tenancy/tenants/%s/", data.ID.ValueString()), updateData)
+			if err != nil {
+				resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to update existing tenant, got error: %s", err))
+				return
+			}
+
+			var updated TenantAPIModel
+			if err := json.Unmarshal(apiResp.Body, &updated); err != nil {
+				resp.Diagnostics.AddError("Parse Error", fmt.Sprintf("Unable to parse tenant response: %s", err))
+				return
+			}
+
+			data.Slug = types.StringValue(updated.Slug)
+
+			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+			return
+		}
+	}
+
+	// Check if we should search for existing tenant by name
 	if !data.Upsert.IsNull() && data.Upsert.ValueBool() {
 		// Search for existing tenant by name
 		params := url.Values{}
