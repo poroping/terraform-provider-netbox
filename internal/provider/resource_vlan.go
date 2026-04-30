@@ -163,11 +163,14 @@ func (r *VLANResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
-	// Check if we should search for existing VLAN
+	// Check if we should search for existing VLAN (upsert without autoassign).
+	// Scoped to the group when group is set, otherwise global name search.
 	if !data.Upsert.IsNull() && data.Upsert.ValueBool() {
-		// Search for existing VLAN by name
 		params := url.Values{}
 		params.Add("name", data.Name.ValueString())
+		if !data.Group.IsNull() {
+			params.Add("group_id", fmt.Sprintf("%d", data.Group.ValueInt64()))
+		}
 
 		results, err := r.client.GetList(ctx, "/api/ipam/vlans/", params)
 		if err != nil {
@@ -176,7 +179,6 @@ func (r *VLANResource) Create(ctx context.Context, req resource.CreateRequest, r
 		}
 
 		if len(results) > 0 {
-			// Found existing VLAN - update it to match desired state
 			var existing VLANAPIModel
 			if err := json.Unmarshal(results[0], &existing); err != nil {
 				resp.Diagnostics.AddError("Parse Error", fmt.Sprintf("Unable to parse VLAN response: %s", err))
@@ -186,7 +188,6 @@ func (r *VLANResource) Create(ctx context.Context, req resource.CreateRequest, r
 			data.ID = types.StringValue(fmt.Sprintf("%d", existing.ID))
 			data.VID = types.Int64Value(int64(existing.VID))
 
-			// Update the existing VLAN with desired configuration
 			updateData := VLANAPIModel{
 				VID:  existing.VID,
 				Name: data.Name.ValueString(),
@@ -194,6 +195,15 @@ func (r *VLANResource) Create(ctx context.Context, req resource.CreateRequest, r
 
 			if !data.Group.IsNull() {
 				updateData.Group = &TenantIDOrObject{ID: int(data.Group.ValueInt64())}
+			}
+			if !data.Tenant.IsNull() {
+				updateData.Tenant = &TenantIDOrObject{ID: int(data.Tenant.ValueInt64())}
+			}
+			if !data.Description.IsNull() {
+				updateData.Description = data.Description.ValueString()
+			}
+			if !data.Comments.IsNull() {
+				updateData.Comments = data.Comments.ValueString()
 			}
 			if len(data.Tags) > 0 {
 				updateData.Tags = ConvertTagsToAPI(data.Tags)
@@ -211,10 +221,12 @@ func (r *VLANResource) Create(ctx context.Context, req resource.CreateRequest, r
 				return
 			}
 
-			// Update state with computed values
 			data.VID = types.Int64Value(int64(updated.VID))
 			if updated.Group != nil {
 				data.Group = types.Int64Value(int64(updated.Group.ID))
+			}
+			if updated.Tenant != nil {
+				data.Tenant = types.Int64Value(int64(updated.Tenant.ID))
 			}
 
 			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
