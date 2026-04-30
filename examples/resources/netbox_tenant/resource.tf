@@ -40,6 +40,16 @@ resource "netbox_tenant" "by_slug" {
   description    = "Adopted by slug match"
 }
 
+# Upsert by explicit slug: when the existing tenant's slug does not match
+# what would be derived from the name, supply the slug directly.
+# The provider uses this value for the lookup instead of Slugify(name).
+resource "netbox_tenant" "by_explicit_slug" {
+  name           = "Initech Rebranded"
+  slug           = "initech"          # search by this slug, not "initech-rebranded"
+  upsert_by_slug = true
+  description    = "Adopted by explicit slug"
+}
+
 # Reference the computed slug in other resources
 output "acme_slug" {
   value = netbox_tenant.basic.slug

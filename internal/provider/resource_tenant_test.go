@@ -66,7 +66,8 @@ func TestAccTenantResource_UpsertBySlug(t *testing.T) {
 				),
 			},
 			// Step 2: a second resource with upsert_by_slug should adopt the
-			// existing tenant (matching by slug) instead of creating a duplicate.
+			// existing tenant (matching by slug derived from name) instead of
+			// creating a duplicate.
 			{
 				Config: testAccTenantResourceConfigUpsertBySlug("test-sensa-byslug"),
 				Check: resource.ComposeAggregateTestCheckFunc(
@@ -78,6 +79,42 @@ func TestAccTenantResource_UpsertBySlug(t *testing.T) {
 					resource.TestCheckResourceAttr("netbox_tenant.test", "upsert_by_slug", "true"),
 					resource.TestCheckResourceAttr("netbox_tenant.test", "description", "Adopted via slug"),
 					resource.TestCheckResourceAttrSet("netbox_tenant.test", "slug"),
+				),
+			},
+		},
+	})
+}
+
+// TestAccTenantResource_UpsertBySlugExplicit verifies that when slug is set
+// explicitly in config, upsert_by_slug uses that value for the lookup rather
+// than deriving a slug from the name. This covers the case where the existing
+// tenant's slug does not match what Slugify(name) would produce.
+func TestAccTenantResource_UpsertBySlugExplicit(t *testing.T) {
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			// Step 1: create a tenant whose slug is "test-lookup-seed" - the name
+			// is chosen so that Slugify produces a known, predictable slug.
+			{
+				Config: testAccTenantResourceConfigUpsertBySlugSetup("test-lookup-seed"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("netbox_tenant.seed", "slug", "test-lookup-seed"),
+				),
+			},
+			// Step 2: adopt the tenant using a *different* name but explicitly
+			// supplying the known slug. This proves the explicit slug is used for
+			// lookup, not a slug derived from the name "Different Display Name".
+			{
+				Config: testAccTenantResourceConfigUpsertBySlugExplicit(),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttrPair(
+						"netbox_tenant.test", "id",
+						"netbox_tenant.seed", "id",
+					),
+					resource.TestCheckResourceAttr("netbox_tenant.test", "slug", "test-lookup-seed"),
+					resource.TestCheckResourceAttr("netbox_tenant.test", "upsert_by_slug", "true"),
+					resource.TestCheckResourceAttr("netbox_tenant.test", "description", "Adopted with explicit slug"),
 				),
 			},
 		},
@@ -111,6 +148,30 @@ resource "netbox_tenant" "test" {
   upsert       = true
 }
 `, name)
+}
+
+// testAccTenantResourceConfigUpsertBySlugExplicit keeps the seed and adds an
+// adopting resource that specifies slug explicitly. The name is intentionally
+// different to prove the explicit slug drives the lookup, not Slugify(name).
+func testAccTenantResourceConfigUpsertBySlugExplicit() string {
+	return testAccProviderConfig() + `
+resource "netbox_tenant" "seed" {
+  name = "test-lookup-seed"
+
+  lifecycle {
+    ignore_changes = [description, name]
+  }
+}
+
+resource "netbox_tenant" "test" {
+  name           = "Different Display Name"
+  slug           = "test-lookup-seed"
+  description    = "Adopted with explicit slug"
+  upsert_by_slug = true
+
+  depends_on = [netbox_tenant.seed]
+}
+`
 }
 
 // testAccTenantResourceConfigUpsertBySlugSetup creates the seed tenant only.
