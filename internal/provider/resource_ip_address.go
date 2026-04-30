@@ -32,15 +32,17 @@ type IPAddressResource struct {
 
 // IPAddressResourceModel describes the resource data model.
 type IPAddressResourceModel struct {
-	ID          types.String `tfsdk:"id"`
-	Address     types.String `tfsdk:"address"`
-	VRF         types.Int64  `tfsdk:"vrf"`
-	Tenant      types.Int64  `tfsdk:"tenant"`
-	DNSName     types.String `tfsdk:"dns_name"`
-	Description types.String `tfsdk:"description"`
-	Comments    types.String `tfsdk:"comments"`
-	Tags        []TagRef     `tfsdk:"tags"`
-	Upsert      types.Bool   `tfsdk:"upsert"`
+	ID             types.String `tfsdk:"id"`
+	Address        types.String `tfsdk:"address"`
+	VRF            types.Int64  `tfsdk:"vrf"`
+	Tenant         types.Int64  `tfsdk:"tenant"`
+	DNSName        types.String `tfsdk:"dns_name"`
+	Description    types.String `tfsdk:"description"`
+	Comments       types.String `tfsdk:"comments"`
+	Tags           []TagRef     `tfsdk:"tags"`
+	Upsert         types.Bool   `tfsdk:"upsert"`
+	Autoassign     types.Bool   `tfsdk:"autoassign"`
+	ParentPrefixID types.Int64  `tfsdk:"parent_prefix_id"`
 }
 
 // IPAddressAPIModel represents the NetBox API response for an IP address
@@ -72,8 +74,12 @@ func (r *IPAddressResource) Schema(ctx context.Context, req resource.SchemaReque
 				},
 			},
 			"address": schema.StringAttribute{
-				Description: "IP address with prefix length (e.g., '10.0.0.1/24').",
-				Required:    true,
+				Description: "IP address with prefix length (e.g., '10.0.0.1/24'). Computed when autoassign is true.",
+				Optional:    true,
+				Computed:    true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.UseStateForUnknown(),
+				},
 			},
 			"vrf": schema.Int64Attribute{
 				Description: "VRF ID that contains this IP address.",
@@ -96,7 +102,15 @@ func (r *IPAddressResource) Schema(ctx context.Context, req resource.SchemaReque
 				Optional:    true,
 			},
 			"upsert": schema.BoolAttribute{
-				Description: "If true, will find and use existing IP address with matching address instead of creating a new one.",
+				Description: "If true, will find and use existing IP address with matching address instead of creating a new one. When combined with autoassign, matches within the parent prefix by dns_name (if set) or tenant+tags.",
+				Optional:    true,
+			},
+			"autoassign": schema.BoolAttribute{
+				Description: "If true, automatically allocate an IP address from parent_prefix_id using the /api/ipam/prefixes/{id}/available-ips/ endpoint. Requires parent_prefix_id to be set.",
+				Optional:    true,
+			},
+			"parent_prefix_id": schema.Int64Attribute{
+				Description: "Parent prefix ID to allocate from when autoassign is true.",
 				Optional:    true,
 			},
 			"tags": schema.ListNestedAttribute{
@@ -148,9 +162,180 @@ func (r *IPAddressResource) Create(ctx context.Context, req resource.CreateReque
 		return
 	}
 
-	// Check if we should search for existing IP address
-	if !data.Upsert.IsNull() && data.Upsert.ValueBool() {
-		// Search for existing IP address
+	isAutoassign := !data.Autoassign.IsNull() && data.Autoassign.ValueBool()
+	isUpsert := !data.Upsert.IsNull() && data.Upsert.ValueBool()
+
+	// Validate requirements
+	if isAutoassign {
+		if data.ParentPrefixID.IsNull() {
+			resp.Diagnostics.AddError("Configuration Error", "parent_prefix_id is required when autoassign is true")
+			return
+		}
+	} else {
+		if data.Address.IsNull() || data.Address.ValueString() == "" {
+			resp.Diagnostics.AddError("Configuration Error", "address must be set when autoassign is false")
+			return
+		}
+	}
+
+	// autoassign + upsert: search for an existing IP within the parent prefix before
+	// allocating a new one. Matches by dns_name (if set) or tenant+tags.
+	if isAutoassign && isUpsert {
+		// Fetch the parent prefix to learn its CIDR for scoped searching.
+		prefixResp, err := r.client.Get(ctx, fmt.Sprintf("/api/ipam/prefixes/%d/", data.ParentPrefixID.ValueInt64()))
+		if err != nil {
+			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to read parent prefix, got error: %s", err))
+			return
+		}
+		var parentPrefix PrefixAPIModel
+		if err := json.Unmarshal(prefixResp.Body, &parentPrefix); err != nil {
+			resp.Diagnostics.AddError("Parse Error", fmt.Sprintf("Unable to parse parent prefix: %s", err))
+			return
+		}
+
+		searchParams := url.Values{}
+		searchParams.Add("parent", parentPrefix.Prefix)
+		if !data.DNSName.IsNull() && data.DNSName.ValueString() != "" {
+			searchParams.Add("dns_name", data.DNSName.ValueString())
+		}
+
+		candidates, err := r.client.GetList(ctx, "/api/ipam/ip-addresses/", searchParams)
+		if err != nil {
+			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to search for existing IP addresses, got error: %s", err))
+			return
+		}
+
+		for _, raw := range candidates {
+			var candidate IPAddressAPIModel
+			if err := json.Unmarshal(raw, &candidate); err != nil {
+				continue
+			}
+
+			// Tenant must match.
+			tenantMatch := false
+			if data.Tenant.IsNull() && candidate.Tenant == nil {
+				tenantMatch = true
+			} else if !data.Tenant.IsNull() && candidate.Tenant != nil && int64(candidate.Tenant.ID) == data.Tenant.ValueInt64() {
+				tenantMatch = true
+			}
+			if !tenantMatch {
+				continue
+			}
+
+			// When dns_name is not the primary key, also require tags to match.
+			if data.DNSName.IsNull() || data.DNSName.ValueString() == "" {
+				if len(data.Tags) != len(candidate.Tags) {
+					continue
+				}
+				slugSet := make(map[string]bool, len(data.Tags))
+				for _, t := range data.Tags {
+					slugSet[t.Slug.ValueString()] = true
+				}
+				tagsMatch := true
+				for _, t := range candidate.Tags {
+					if !slugSet[t.Slug] {
+						tagsMatch = false
+						break
+					}
+				}
+				if !tagsMatch {
+					continue
+				}
+			}
+
+			// Found an existing IP — adopt it.
+			data.ID = types.StringValue(fmt.Sprintf("%d", candidate.ID))
+			data.Address = types.StringValue(candidate.Address)
+
+			updateData := IPAddressAPIModel{Address: candidate.Address}
+			if !data.VRF.IsNull() {
+				updateData.VRF = &struct{ ID int }{ID: int(data.VRF.ValueInt64())}
+			}
+			if !data.Tenant.IsNull() {
+				updateData.Tenant = &TenantIDOrObject{ID: int(data.Tenant.ValueInt64())}
+			}
+			if !data.DNSName.IsNull() {
+				updateData.DNSName = data.DNSName.ValueString()
+			}
+			if !data.Description.IsNull() {
+				updateData.Description = data.Description.ValueString()
+			}
+			if !data.Comments.IsNull() {
+				updateData.Comments = data.Comments.ValueString()
+			}
+			if len(data.Tags) > 0 {
+				updateData.Tags = ConvertTagsToAPI(data.Tags)
+			}
+
+			apiResp, err := r.client.Update(ctx, fmt.Sprintf("/api/ipam/ip-addresses/%s/", data.ID.ValueString()), updateData)
+			if err != nil {
+				resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to update existing IP address, got error: %s", err))
+				return
+			}
+			var updated IPAddressAPIModel
+			if err := json.Unmarshal(apiResp.Body, &updated); err != nil {
+				resp.Diagnostics.AddError("Parse Error", fmt.Sprintf("Unable to parse IP address response: %s", err))
+				return
+			}
+			if updated.VRF != nil {
+				data.VRF = types.Int64Value(int64(updated.VRF.ID))
+			}
+			if updated.Tenant != nil {
+				data.Tenant = types.Int64Value(int64(updated.Tenant.ID))
+			}
+			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+			return
+		}
+	}
+
+	// Autoassign: allocate a new IP from the parent prefix.
+	if isAutoassign {
+		allocateData := map[string]interface{}{}
+		if !data.VRF.IsNull() {
+			allocateData["vrf"] = map[string]interface{}{"id": data.VRF.ValueInt64()}
+		}
+		if !data.Tenant.IsNull() {
+			allocateData["tenant"] = map[string]interface{}{"id": data.Tenant.ValueInt64()}
+		}
+		if !data.DNSName.IsNull() {
+			allocateData["dns_name"] = data.DNSName.ValueString()
+		}
+		if !data.Description.IsNull() {
+			allocateData["description"] = data.Description.ValueString()
+		}
+		if !data.Comments.IsNull() {
+			allocateData["comments"] = data.Comments.ValueString()
+		}
+		if len(data.Tags) > 0 {
+			allocateData["tags"] = ConvertTagsToAPI(data.Tags)
+		}
+
+		apiResp, err := r.client.Create(ctx, fmt.Sprintf("/api/ipam/prefixes/%d/available-ips/", data.ParentPrefixID.ValueInt64()), allocateData)
+		if err != nil {
+			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to allocate IP address from prefix, got error: %s", err))
+			return
+		}
+
+		var created IPAddressAPIModel
+		if err := json.Unmarshal(apiResp.Body, &created); err != nil {
+			resp.Diagnostics.AddError("Parse Error", fmt.Sprintf("Unable to parse IP address response: %s", err))
+			return
+		}
+
+		data.ID = types.StringValue(fmt.Sprintf("%d", created.ID))
+		data.Address = types.StringValue(created.Address)
+		if created.VRF != nil {
+			data.VRF = types.Int64Value(int64(created.VRF.ID))
+		}
+		if created.Tenant != nil {
+			data.Tenant = types.Int64Value(int64(created.Tenant.ID))
+		}
+		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+		return
+	}
+
+	// Upsert (non-autoassign): search for existing IP by exact address.
+	if isUpsert {
 		params := url.Values{}
 		params.Add("address", data.Address.ValueString())
 
@@ -161,7 +346,6 @@ func (r *IPAddressResource) Create(ctx context.Context, req resource.CreateReque
 		}
 
 		if len(results) > 0 {
-			// Found existing IP address - update it to match desired state
 			var existing IPAddressAPIModel
 			if err := json.Unmarshal(results[0], &existing); err != nil {
 				resp.Diagnostics.AddError("Parse Error", fmt.Sprintf("Unable to parse IP address response: %s", err))
@@ -170,11 +354,7 @@ func (r *IPAddressResource) Create(ctx context.Context, req resource.CreateReque
 
 			data.ID = types.StringValue(fmt.Sprintf("%d", existing.ID))
 
-			// Update the existing IP address with desired configuration
-			updateData := IPAddressAPIModel{
-				Address: data.Address.ValueString(),
-			}
-
+			updateData := IPAddressAPIModel{Address: data.Address.ValueString()}
 			if !data.VRF.IsNull() {
 				updateData.VRF = &struct{ ID int }{ID: int(data.VRF.ValueInt64())}
 			}
@@ -205,24 +385,21 @@ func (r *IPAddressResource) Create(ctx context.Context, req resource.CreateReque
 				resp.Diagnostics.AddError("Parse Error", fmt.Sprintf("Unable to parse IP address response: %s", err))
 				return
 			}
-
 			if updated.VRF != nil {
 				data.VRF = types.Int64Value(int64(updated.VRF.ID))
 			}
 			if updated.Tenant != nil {
 				data.Tenant = types.Int64Value(int64(updated.Tenant.ID))
 			}
-
 			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 			return
 		}
 	}
 
-	// Create new IP address
+	// Normal create.
 	createData := IPAddressAPIModel{
 		Address: data.Address.ValueString(),
 	}
-
 	if !data.VRF.IsNull() {
 		createData.VRF = &struct{ ID int }{ID: int(data.VRF.ValueInt64())}
 	}

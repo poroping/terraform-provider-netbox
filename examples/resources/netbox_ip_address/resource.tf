@@ -43,3 +43,53 @@ resource "netbox_ip_address" "vrf_addr" {
   tenant  = netbox_tenant.customer_a.id
   upsert  = true
 }
+
+# ── Autoassign ──────────────────────────────────────────────────────────────
+# The prefix to allocate from. It must already exist in NetBox.
+resource "netbox_prefix" "server_pool" {
+  prefix      = "10.10.0.0/24"
+  description = "Server address pool"
+}
+
+# Autoassign: the provider calls POST /api/ipam/prefixes/{id}/available-ips/
+# and NetBox returns the first unallocated IP in the prefix.
+# The 'address' attribute is computed and available in state after apply.
+resource "netbox_ip_address" "auto_web" {
+  autoassign       = true
+  parent_prefix_id = netbox_prefix.server_pool.id
+  dns_name         = "web02.example.com"
+  description      = "Auto-allocated address for web02"
+  tenant           = netbox_tenant.acme.id
+}
+
+resource "netbox_ip_address" "auto_db" {
+  autoassign       = true
+  parent_prefix_id = netbox_prefix.server_pool.id
+  dns_name         = "db01.example.com"
+  description      = "Auto-allocated address for db01"
+  tenant           = netbox_tenant.acme.id
+}
+
+# Expose computed addresses for use by other resources
+output "web02_ip" {
+  value = netbox_ip_address.auto_web.address
+}
+
+output "db01_ip" {
+  value = netbox_ip_address.auto_db.address
+}
+
+# Autoassign + upsert: idempotent allocation.
+# Primary match key: dns_name within the parent prefix.
+# On first apply: a new IP is allocated from the prefix.
+# On re-apply (e.g. after accidental destroy): the provider finds the existing
+# record by dns_name within the prefix and re-uses it instead of allocating a
+# second address.
+resource "netbox_ip_address" "auto_upsert" {
+  autoassign       = true
+  upsert           = true
+  parent_prefix_id = netbox_prefix.server_pool.id
+  dns_name         = "mgmt01.example.com"
+  description      = "Management interface - idempotently allocated"
+  tenant           = netbox_tenant.acme.id
+}
