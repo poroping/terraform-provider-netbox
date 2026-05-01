@@ -36,6 +36,7 @@ type PrefixResourceModel struct {
 	Prefix         types.String `tfsdk:"prefix"`
 	VRF            types.Int64  `tfsdk:"vrf"`
 	Tenant         types.Int64  `tfsdk:"tenant"`
+	VLAN           types.Int64  `tfsdk:"vlan"`
 	Description    types.String `tfsdk:"description"`
 	Comments       types.String `tfsdk:"comments"`
 	Tags           []TagRef     `tfsdk:"tags"`
@@ -49,8 +50,9 @@ type PrefixResourceModel struct {
 type PrefixAPIModel struct {
 	ID          int               `json:"id"`
 	Prefix      string            `json:"prefix"`
-	VRF         *struct{ ID int } `json:"vrf,omitempty"`
+	VRF         *TenantIDOrObject `json:"vrf,omitempty"`
 	Tenant      *TenantIDOrObject `json:"tenant,omitempty"`
+	VLAN        *TenantIDOrObject `json:"vlan,omitempty"`
 	Description string            `json:"description,omitempty"`
 	Comments    string            `json:"comments,omitempty"`
 	Tags        []TagAPIRef       `json:"tags,omitempty"`
@@ -98,6 +100,10 @@ func (r *PrefixResource) Schema(ctx context.Context, req resource.SchemaRequest,
 			},
 			"tenant": schema.Int64Attribute{
 				Description: "Tenant ID that owns this prefix.",
+				Optional:    true,
+			},
+			"vlan": schema.Int64Attribute{
+				Description: "VLAN ID to associate with this prefix. Used as an additional match dimension in autoassign+upsert lookups.",
 				Optional:    true,
 			},
 			"description": schema.StringAttribute{
@@ -226,21 +232,32 @@ func (r *PrefixResource) Create(ctx context.Context, req resource.CreateRequest,
 					}
 				}
 
-				if tagsMatch {
+				// Check VLAN match (only when vlan is set in config).
+				vlanMatches := false
+				if data.VLAN.IsNull() {
+					// vlan not specified — skip vlan as a match criterion
+					vlanMatches = true
+				} else if existing.VLAN != nil && int64(existing.VLAN.ID) == data.VLAN.ValueInt64() {
+					vlanMatches = true
+				}
+
+				if tagsMatch && vlanMatches {
 					// Found existing prefix - update it to match desired state
 					data.ID = types.StringValue(fmt.Sprintf("%d", existing.ID))
 					data.Prefix = types.StringValue(existing.Prefix)
 
-					// Update the existing prefix with desired configuration
 					updateData := PrefixAPIModel{
 						Prefix: existing.Prefix,
 					}
 
 					if !data.VRF.IsNull() {
-						updateData.VRF = &struct{ ID int }{ID: int(data.VRF.ValueInt64())}
+						updateData.VRF = &TenantIDOrObject{ID: int(data.VRF.ValueInt64())}
 					}
 					if !data.Tenant.IsNull() {
 						updateData.Tenant = &TenantIDOrObject{ID: int(data.Tenant.ValueInt64())}
+					}
+					if !data.VLAN.IsNull() {
+						updateData.VLAN = &TenantIDOrObject{ID: int(data.VLAN.ValueInt64())}
 					}
 					if !data.Description.IsNull() {
 						updateData.Description = data.Description.ValueString()
@@ -270,6 +287,9 @@ func (r *PrefixResource) Create(ctx context.Context, req resource.CreateRequest,
 					if updated.Tenant != nil {
 						data.Tenant = types.Int64Value(int64(updated.Tenant.ID))
 					}
+					if updated.VLAN != nil {
+						data.VLAN = types.Int64Value(int64(updated.VLAN.ID))
+					}
 
 					resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 					return
@@ -287,6 +307,9 @@ func (r *PrefixResource) Create(ctx context.Context, req resource.CreateRequest,
 		}
 		if !data.Tenant.IsNull() {
 			allocateData["tenant"] = map[string]interface{}{"id": int(data.Tenant.ValueInt64())}
+		}
+		if !data.VLAN.IsNull() {
+			allocateData["vlan"] = map[string]interface{}{"id": int(data.VLAN.ValueInt64())}
 		}
 		if !data.Description.IsNull() {
 			allocateData["description"] = data.Description.ValueString()
@@ -316,6 +339,9 @@ func (r *PrefixResource) Create(ctx context.Context, req resource.CreateRequest,
 		}
 		if created.Tenant != nil {
 			data.Tenant = types.Int64Value(int64(created.Tenant.ID))
+		}
+		if created.VLAN != nil {
+			data.VLAN = types.Int64Value(int64(created.VLAN.ID))
 		}
 
 		resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -350,10 +376,13 @@ func (r *PrefixResource) Create(ctx context.Context, req resource.CreateRequest,
 			}
 
 			if !data.VRF.IsNull() {
-				updateData.VRF = &struct{ ID int }{ID: int(data.VRF.ValueInt64())}
+				updateData.VRF = &TenantIDOrObject{ID: int(data.VRF.ValueInt64())}
 			}
 			if !data.Tenant.IsNull() {
 				updateData.Tenant = &TenantIDOrObject{ID: int(data.Tenant.ValueInt64())}
+			}
+			if !data.VLAN.IsNull() {
+				updateData.VLAN = &TenantIDOrObject{ID: int(data.VLAN.ValueInt64())}
 			}
 			if !data.Description.IsNull() {
 				updateData.Description = data.Description.ValueString()
@@ -383,6 +412,9 @@ func (r *PrefixResource) Create(ctx context.Context, req resource.CreateRequest,
 			if updated.Tenant != nil {
 				data.Tenant = types.Int64Value(int64(updated.Tenant.ID))
 			}
+			if updated.VLAN != nil {
+				data.VLAN = types.Int64Value(int64(updated.VLAN.ID))
+			}
 
 			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 			return
@@ -400,10 +432,13 @@ func (r *PrefixResource) Create(ctx context.Context, req resource.CreateRequest,
 	}
 
 	if !data.VRF.IsNull() {
-		createData.VRF = &struct{ ID int }{ID: int(data.VRF.ValueInt64())}
+		createData.VRF = &TenantIDOrObject{ID: int(data.VRF.ValueInt64())}
 	}
 	if !data.Tenant.IsNull() {
 		createData.Tenant = &TenantIDOrObject{ID: int(data.Tenant.ValueInt64())}
+	}
+	if !data.VLAN.IsNull() {
+		createData.VLAN = &TenantIDOrObject{ID: int(data.VLAN.ValueInt64())}
 	}
 	if !data.Description.IsNull() {
 		createData.Description = data.Description.ValueString()
@@ -434,6 +469,9 @@ func (r *PrefixResource) Create(ctx context.Context, req resource.CreateRequest,
 	}
 	if created.Tenant != nil {
 		data.Tenant = types.Int64Value(int64(created.Tenant.ID))
+	}
+	if created.VLAN != nil {
+		data.VLAN = types.Int64Value(int64(created.VLAN.ID))
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -466,6 +504,11 @@ func (r *PrefixResource) Read(ctx context.Context, req resource.ReadRequest, res
 	if prefix.Tenant != nil {
 		data.Tenant = types.Int64Value(int64(prefix.Tenant.ID))
 	}
+	if prefix.VLAN != nil {
+		data.VLAN = types.Int64Value(int64(prefix.VLAN.ID))
+	} else {
+		data.VLAN = types.Int64Null()
+	}
 	if prefix.Description != "" {
 		data.Description = types.StringValue(prefix.Description)
 	} else {
@@ -494,10 +537,13 @@ func (r *PrefixResource) Update(ctx context.Context, req resource.UpdateRequest,
 	}
 
 	if !data.VRF.IsNull() {
-		updateData.VRF = &struct{ ID int }{ID: int(data.VRF.ValueInt64())}
+		updateData.VRF = &TenantIDOrObject{ID: int(data.VRF.ValueInt64())}
 	}
 	if !data.Tenant.IsNull() {
 		updateData.Tenant = &TenantIDOrObject{ID: int(data.Tenant.ValueInt64())}
+	}
+	if !data.VLAN.IsNull() {
+		updateData.VLAN = &TenantIDOrObject{ID: int(data.VLAN.ValueInt64())}
 	}
 	if !data.Description.IsNull() {
 		updateData.Description = data.Description.ValueString()
@@ -526,6 +572,9 @@ func (r *PrefixResource) Update(ctx context.Context, req resource.UpdateRequest,
 	}
 	if updated.Tenant != nil {
 		data.Tenant = types.Int64Value(int64(updated.Tenant.ID))
+	}
+	if updated.VLAN != nil {
+		data.VLAN = types.Int64Value(int64(updated.VLAN.ID))
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)

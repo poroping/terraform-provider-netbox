@@ -49,7 +49,7 @@ type IPAddressResourceModel struct {
 type IPAddressAPIModel struct {
 	ID          int               `json:"id"`
 	Address     string            `json:"address"`
-	VRF         *struct{ ID int } `json:"vrf,omitempty"`
+	VRF         *TenantIDOrObject `json:"vrf,omitempty"`
 	Tenant      *TenantIDOrObject `json:"tenant,omitempty"`
 	DNSName     string            `json:"dns_name,omitempty"`
 	Description string            `json:"description,omitempty"`
@@ -249,7 +249,7 @@ func (r *IPAddressResource) Create(ctx context.Context, req resource.CreateReque
 
 			updateData := IPAddressAPIModel{Address: candidate.Address}
 			if !data.VRF.IsNull() {
-				updateData.VRF = &struct{ ID int }{ID: int(data.VRF.ValueInt64())}
+				updateData.VRF = &TenantIDOrObject{ID: int(data.VRF.ValueInt64())}
 			}
 			if !data.Tenant.IsNull() {
 				updateData.Tenant = &TenantIDOrObject{ID: int(data.Tenant.ValueInt64())}
@@ -356,7 +356,7 @@ func (r *IPAddressResource) Create(ctx context.Context, req resource.CreateReque
 
 			updateData := IPAddressAPIModel{Address: data.Address.ValueString()}
 			if !data.VRF.IsNull() {
-				updateData.VRF = &struct{ ID int }{ID: int(data.VRF.ValueInt64())}
+				updateData.VRF = &TenantIDOrObject{ID: int(data.VRF.ValueInt64())}
 			}
 			if !data.Tenant.IsNull() {
 				updateData.Tenant = &TenantIDOrObject{ID: int(data.Tenant.ValueInt64())}
@@ -401,7 +401,7 @@ func (r *IPAddressResource) Create(ctx context.Context, req resource.CreateReque
 		Address: data.Address.ValueString(),
 	}
 	if !data.VRF.IsNull() {
-		createData.VRF = &struct{ ID int }{ID: int(data.VRF.ValueInt64())}
+		createData.VRF = &TenantIDOrObject{ID: int(data.VRF.ValueInt64())}
 	}
 	if !data.Tenant.IsNull() {
 		createData.Tenant = &TenantIDOrObject{ID: int(data.Tenant.ValueInt64())}
@@ -502,7 +502,7 @@ func (r *IPAddressResource) Update(ctx context.Context, req resource.UpdateReque
 	}
 
 	if !data.VRF.IsNull() {
-		updateData.VRF = &struct{ ID int }{ID: int(data.VRF.ValueInt64())}
+		updateData.VRF = &TenantIDOrObject{ID: int(data.VRF.ValueInt64())}
 	}
 	if !data.Tenant.IsNull() {
 		updateData.Tenant = &TenantIDOrObject{ID: int(data.Tenant.ValueInt64())}

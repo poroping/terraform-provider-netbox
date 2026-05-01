@@ -3,11 +3,12 @@ resource "netbox_prefix" "basic" {
   prefix = "10.0.0.0/24"
 }
 
-# Full prefix with all optional attributes
+# Full prefix with all optional attributes, including vlan assignment
 resource "netbox_prefix" "full" {
   prefix      = "10.1.0.0/24"
   vrf         = netbox_vrf.mgmt.id
   tenant      = netbox_tenant.acme.id
+  vlan        = netbox_vlan.web.id
   description = "Management network"
   comments    = "Allocated for the management plane"
 

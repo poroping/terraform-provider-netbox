@@ -31,6 +31,72 @@ func TestAccPrefixResource(t *testing.T) {
 	})
 }
 
+func TestAccPrefixResource_VLAN(t *testing.T) {
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			// Create a VLAN and a prefix assigned to it.
+			{
+				Config: testAccPrefixResourceVLANConfig(),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("netbox_prefix.vlan_prefix", "prefix", "10.50.0.0/24"),
+					resource.TestCheckResourceAttrSet("netbox_prefix.vlan_prefix", "vlan"),
+					resource.TestCheckResourceAttrPair(
+						"netbox_prefix.vlan_prefix", "vlan",
+						"netbox_vlan.test", "id",
+					),
+				),
+			},
+			// Update description; vlan assignment should be preserved.
+			{
+				Config: testAccPrefixResourceVLANConfigUpdated(),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("netbox_prefix.vlan_prefix", "description", "Updated description"),
+					resource.TestCheckResourceAttrPair(
+						"netbox_prefix.vlan_prefix", "vlan",
+						"netbox_vlan.test", "id",
+					),
+				),
+			},
+		},
+	})
+}
+
+func testAccPrefixResourceVLANConfig() string {
+	return testAccProviderConfig() + `
+resource "netbox_vlan" "test" {
+  vid    = 501
+  name   = "test-pfx-vlan"
+  upsert = true
+}
+
+resource "netbox_prefix" "vlan_prefix" {
+  prefix      = "10.50.0.0/24"
+  vlan        = netbox_vlan.test.id
+  description = "Prefix assigned to VLAN 501"
+  upsert      = true
+}
+`
+}
+
+func testAccPrefixResourceVLANConfigUpdated() string {
+	return testAccProviderConfig() + `
+resource "netbox_vlan" "test" {
+  vid    = 501
+  name   = "test-pfx-vlan"
+  upsert = true
+}
+
+resource "netbox_prefix" "vlan_prefix" {
+  prefix      = "10.50.0.0/24"
+  vlan        = netbox_vlan.test.id
+  description = "Updated description"
+  upsert      = true
+}
+`
+}
+
 func testAccPrefixResourceConfig(prefix, status string) string {
 	return testAccProviderConfig() + fmt.Sprintf(`
 resource "netbox_tag" "prefix1" {
